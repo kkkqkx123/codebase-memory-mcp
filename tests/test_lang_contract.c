@@ -522,7 +522,7 @@ TEST(contract_all_grammars_in_graph) {
         n = GRAMMAR_BREADTH_MAX;
     }
     static char names[GRAMMAR_BREADTH_MAX][GRAMMAR_PATH_BUF];
-    LangFile files[GRAMMAR_BREADTH_MAX];
+    LangFile files[GRAMMAR_BREADTH_MAX] = {0}; /* zero-init: GCC -Werror=maybe-uninitialized */
     for (int i = 0; i < n; i++) {
         snprintf(names[i], sizeof(names[i]), "g%03d/%s", i, CBM_GRAMMAR_CASES[i].path);
         files[i].name = names[i];
@@ -1067,7 +1067,7 @@ enum { PARALLEL_PAD_FILES = 52 };
 static cbm_store_t *index_parallel_fixture(LangProj *lp, const LangFile *meaningful, int n_mean) {
     static char pad_name[PARALLEL_PAD_FILES][40];
     static char pad_body[PARALLEL_PAD_FILES][64];
-    LangFile files[PARALLEL_PAD_FILES + 16];
+    LangFile files[PARALLEL_PAD_FILES + 16] = {0}; /* zero-init: GCC -Werror=maybe-uninitialized */
     int n = 0;
     for (int i = 0; i < n_mean; i++) {
         files[n++] = meaningful[i];
