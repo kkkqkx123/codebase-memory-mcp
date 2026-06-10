@@ -71,8 +71,11 @@ typedef struct {
     int pending_tc_cap;
 
     // Flags
-    bool cpp_mode;    // C++ features enabled
-    bool in_template; // currently inside template declaration
+    bool cpp_mode;        // C++ features enabled
+    bool in_template;     // currently inside template declaration
+    bool registry_shared; // ctx->registry is the Tier-2 cross registry, shared
+                          // READ-ONLY across resolve workers — never mutate it
+                          // (and never store per-worker arena pointers into it)
     bool debug;
     int eval_depth; // recursion depth for c_eval_expr_type (crash guard)
     int eval_steps; // total expression eval calls for current file (hang guard)

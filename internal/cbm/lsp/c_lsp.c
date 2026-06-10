@@ -4143,8 +4143,14 @@ static void c_process_function(CLSPContext *ctx, TSNode func_node) {
     ctx->enclosing_func_qn = func_qn;
 
     // If inside a template, attach type_param_names to the registered function
-    // so pending template calls can be resolved at call sites.
-    if (ctx->in_template && ctx->template_param_count > 0) {
+    // so pending template calls can be resolved at call sites. NEVER do this
+    // against the shared Tier-2 cross registry: resolve workers walk files
+    // concurrently, so the write races other readers AND stores a pointer to
+    // THIS worker's per-file arena into shared state — once that arena is
+    // recycled the registry holds dangling memory (intermittent SIGSEGV
+    // indexing bitcoin). Cross-phase template deduction then relies on the
+    // positional fallback, which is graceful degradation.
+    if (ctx->in_template && ctx->template_param_count > 0 && !ctx->registry_shared) {
         // Find the registered function and set type_param_names
         for (int ri = 0; ri < ((CBMTypeRegistry *)ctx->registry)->func_count; ri++) {
             CBMRegisteredFunc *rf = &((CBMTypeRegistry *)ctx->registry)->funcs[ri];
@@ -5207,6 +5213,7 @@ void cbm_run_c_lsp_cross_with_registry(CBMArena *arena, const char *source, int 
 
     CLSPContext ctx;
     c_lsp_init(&ctx, arena, source, source_len, reg, module_qn, cpp_mode, out);
+    ctx.registry_shared = true; /* Tier-2 shared registry: read-only, see flag doc */
     for (int i = 0; i < include_count; i++) {
         c_lsp_add_include(&ctx, include_paths[i], include_ns_qns[i]);
     }
