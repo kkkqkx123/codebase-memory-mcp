@@ -898,7 +898,13 @@ static int dump_and_persist_hashes(cbm_pipeline_t *p, const cbm_file_info_t *fil
 
     /* Export persistent artifact if enabled */
     if (p->persistence) {
-        cbm_artifact_export(db_path, p->repo_path, p->project_name, CBM_ARTIFACT_BEST);
+        int arc = cbm_artifact_export(db_path, p->repo_path, p->project_name, CBM_ARTIFACT_BEST);
+        if (arc != 0) {
+            const char *err = cbm_artifact_export_last_error();
+            cbm_log_error("pipeline.err", "phase", "artifact_export", "err", err ? err : "unknown");
+            /* A failed persistence export intentionally fails the run; this used to be ignored. */
+            return arc;
+        }
     }
 
     return 0;
