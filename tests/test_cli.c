@@ -1750,6 +1750,42 @@ TEST(cli_gemini_session_hook_parity) {
     PASS();
 }
 
+/* Claude SubagentStart reminder: subagents spawned via the Agent tool do not
+ * fire SessionStart, so this hook is their code-discovery channel. Verify the
+ * install shape, idempotent re-install, and clean removal. */
+TEST(cli_claude_subagent_hook) {
+    char tmpdir[256];
+    snprintf(tmpdir, sizeof(tmpdir), "/tmp/cli-subhook-XXXXXX");
+    if (!cbm_mkdtemp(tmpdir))
+        FAIL("cbm_mkdtemp failed");
+
+    char cfg[512];
+    snprintf(cfg, sizeof(cfg), "%s/settings.json", tmpdir);
+
+    ASSERT_EQ(cbm_upsert_claude_subagent_hooks(cfg), 0);
+    const char *d = read_test_file(cfg);
+    ASSERT_NOT_NULL(d);
+    ASSERT(strstr(d, "SubagentStart") != NULL);
+    ASSERT(strstr(d, "\"*\"") != NULL);                 /* match-all matcher */
+    ASSERT(strstr(d, "cbm-subagent-reminder") != NULL); /* points at the hook script */
+
+    /* Idempotent: a second upsert must not duplicate our entry. */
+    ASSERT_EQ(cbm_upsert_claude_subagent_hooks(cfg), 0);
+    d = read_test_file(cfg);
+    ASSERT_NOT_NULL(d);
+    int count = 0;
+    for (const char *p = d; (p = strstr(p, "cbm-subagent-reminder")) != NULL; p++)
+        count++;
+    ASSERT_EQ(count, 1);
+
+    ASSERT_EQ(cbm_remove_claude_subagent_hooks(cfg), 0);
+    d = read_test_file(cfg);
+    ASSERT_NULL(strstr(d, "SubagentStart"));
+
+    test_rmdir_r(tmpdir);
+    PASS();
+}
+
 TEST(cli_detect_agents_finds_gemini) {
     char tmpdir[256];
     snprintf(tmpdir, sizeof(tmpdir), "/tmp/cli-detect-XXXXXX");
@@ -2831,6 +2867,7 @@ SUITE(cli) {
     RUN_TEST(cli_install_plan_receipt_no_mutation_issue388);
     RUN_TEST(cli_codex_session_hook_issue330);
     RUN_TEST(cli_gemini_session_hook_parity);
+    RUN_TEST(cli_claude_subagent_hook);
     RUN_TEST(cli_detect_agents_finds_gemini);
     RUN_TEST(cli_detect_agents_finds_zed);
     RUN_TEST(cli_detect_agents_finds_antigravity);
