@@ -276,6 +276,9 @@ void cbm_watcher_free(cbm_watcher_t *w) {
     if (!w) {
         return;
     }
+    /* Safety net: ensure stopped is set before draining pending_free.
+     * In production the caller should cbm_watcher_stop() + join first. */
+    atomic_store(&w->stopped, 1);
     cbm_mutex_lock(&w->projects_lock);
     cbm_ht_foreach(w->projects, free_state_entry, NULL);
     cbm_ht_free(w->projects);
