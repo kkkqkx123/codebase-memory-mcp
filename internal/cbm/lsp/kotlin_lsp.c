@@ -42,6 +42,10 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* Minimal Kotlin universal builtins as real graph nodes (kt_builtins_inject_defs).
+ * Amalgamation-included (see lsp_all.c); mirror of py_builtins.c. */
+#include "kotlin_builtins.c"
+
 #define KT_EVAL_MAX_DEPTH 32
 #define KT_IMPORT_INITIAL_CAP 16
 
@@ -4116,6 +4120,10 @@ void cbm_run_kotlin_lsp(CBMArena *arena, CBMFileResult *result, const char *sour
                     project_name, /*rel_path=*/NULL, &result->resolved_calls);
 
     kotlin_lsp_process_file(&ctx, use_root);
+
+    /* Inject kotlin.Any universal-method nodes (toString/equals/hashCode) so the
+     * lsp_kt_any fallback emitted above has a target node to form a CALLS edge. */
+    kt_builtins_inject_defs(result, arena);
 
     if (patched_tree) {
         ts_tree_delete(patched_tree);

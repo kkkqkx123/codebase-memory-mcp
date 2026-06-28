@@ -536,13 +536,9 @@ TEST(repro_lsp_kt_lambda_it) {
     return assert_lsp_strategy("main.kt", kKtLambdaIt, "lsp_kt_lambda_it");
 }
 TEST(repro_lsp_kt_any) {
-    /* PARKED for release: `x.toString()` on an unknown-typed receiver resolves to
-     * kotlin.Any.toString — a builtin with no node in the project, so no CALLS
-     * edge can form (callable=0). Needs an Any/builtin node (a kotlin stdlib
-     * registry) to anchor the edge. */
-    printf("  %sSKIP%s parked: needs a kotlin.Any/builtin node (toString has no target)\n",
-           tf_dim(), tf_reset());
-    return -1; /* skip — not counted as pass or fail */
+    /* x.toString() on an unknown-typed receiver resolves to kotlin.Any.toString
+     * (the universal-method fallback) and forms a CALLS edge to the injected
+     * kotlin.Any.toString node (kotlin_builtins.c). */
     return assert_lsp_strategy("main.kt", kKtAny, "lsp_kt_any");
 }
 TEST(repro_lsp_kt_destructure) {

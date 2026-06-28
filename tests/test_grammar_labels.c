@@ -86,7 +86,9 @@ static const LabelGolden LABEL_GOLDENS[] = {
     {"typescript", "Class:1,Function:1,Module:1"},
     {"tsx", "Function:1,Module:1"},
     {"java", "Class:1,Method:1,Module:1"},
-    {"kotlin", "Class:1,Function:1,Module:1"},
+    /* +Class:1 (kotlin.Any) +Method:3 (toString/equals/hashCode) injected by
+     * kotlin_builtins.c, as python's golden includes its injected builtins. */
+    {"kotlin", "Class:2,Function:1,Method:3,Module:1"},
     {"rust", "Function:1,Module:1,Struct:1"},
     {"ruby", "Class:1,Function:1,Module:1"},
     {"php", "Class:1,Function:1,Module:1"},
