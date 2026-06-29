@@ -1795,9 +1795,15 @@ static const char *const cmm_gemini_old_matchers[] = {
     NULL,
 };
 
-/* Check if a hook array entry is ours (current matcher or a known old one). */
+/* Check if a hook array entry is ours (current matcher or a known old one).
+ * When require_command_substr is non-NULL, the matcher match is not sufficient:
+ * the entry must ALSO carry a hooks[].command containing that substring. This
+ * disambiguates our entry from a user's own hook that happens to share the same
+ * matcher (notably "*", which a user is likely to pick for a catch-all hook), so
+ * upsert/remove never clobber a foreign entry. NULL preserves matcher-only
+ * matching for callers whose matcher is already CMM-specific (e.g. "startup"). */
 static bool is_cmm_hook_entry(yyjson_mut_val *entry, const char *matcher_str,
-                              const char *const *old_matchers) {
+                              const char *const *old_matchers, const char *require_command_substr) {
     yyjson_mut_val *matcher = yyjson_mut_obj_get(entry, "matcher");
     if (!matcher || !yyjson_mut_is_str(matcher)) {
         return false;
@@ -1806,16 +1812,36 @@ static bool is_cmm_hook_entry(yyjson_mut_val *entry, const char *matcher_str,
     if (!val) {
         return false;
     }
-    if (strcmp(val, matcher_str) == 0) {
-        return true;
-    }
+    bool matcher_ok = strcmp(val, matcher_str) == 0;
     /* Also match old versions for backwards-compatible upgrade */
-    for (int i = 0; old_matchers && old_matchers[i]; i++) {
+    for (int i = 0; !matcher_ok && old_matchers && old_matchers[i]; i++) {
         if (strcmp(val, old_matchers[i]) == 0) {
-            return true;
+            matcher_ok = true;
         }
     }
-    return false;
+    if (!matcher_ok) {
+        return false;
+    }
+    if (require_command_substr) {
+        yyjson_mut_val *hooks = yyjson_mut_obj_get(entry, "hooks");
+        if (!hooks || !yyjson_mut_is_arr(hooks)) {
+            return false;
+        }
+        size_t idx;
+        size_t max;
+        yyjson_mut_val *h;
+        yyjson_mut_arr_foreach(hooks, idx, max, h) {
+            yyjson_mut_val *cmd = yyjson_mut_obj_get(h, "command");
+            if (cmd && yyjson_mut_is_str(cmd)) {
+                const char *cs = yyjson_mut_get_str(cmd);
+                if (cs && strstr(cs, require_command_substr)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+    return true;
 }
 
 /* Generic hook upsert for both Claude Code and Gemini CLI */
@@ -1825,8 +1851,10 @@ typedef struct {
     const char *hook_event;
     const char *matcher_str;
     const char *command_str;
-    const char *const *old_matchers; /* NULL-terminated; may be NULL */
-    int timeout_sec;                 /* >0 adds "timeout" to the hook entry */
+    const char *const *old_matchers;  /* NULL-terminated; may be NULL */
+    int timeout_sec;                  /* >0 adds "timeout" to the hook entry */
+    const char *match_command_substr; /* non-NULL: also require this in the
+                                       * entry command to claim ownership */
 } hooks_upsert_args_t;
 static int upsert_hooks_json(hooks_upsert_args_t args) {
     const char *settings_path = args.settings_path;
@@ -1876,7 +1904,7 @@ static int upsert_hooks_json(hooks_upsert_args_t args) {
     size_t max;
     yyjson_mut_val *item;
     yyjson_mut_arr_foreach(event_arr, idx, max, item) {
-        if (is_cmm_hook_entry(item, matcher_str, old_matchers)) {
+        if (is_cmm_hook_entry(item, matcher_str, old_matchers, args.match_command_substr)) {
             yyjson_mut_arr_remove(event_arr, idx);
             break;
         }
@@ -1909,7 +1937,9 @@ typedef struct {
     const char *settings_path;
     const char *hook_event;
     const char *matcher_str;
-    const char *const *old_matchers; /* NULL-terminated; may be NULL */
+    const char *const *old_matchers;  /* NULL-terminated; may be NULL */
+    const char *match_command_substr; /* non-NULL: also require this in the
+                                       * entry command to claim ownership */
 } hooks_remove_args_t;
 static int remove_hooks_json(hooks_remove_args_t args) {
     const char *settings_path = args.settings_path;
@@ -1950,7 +1980,7 @@ static int remove_hooks_json(hooks_remove_args_t args) {
     size_t max;
     yyjson_mut_val *item;
     yyjson_mut_arr_foreach(event_arr, idx, max, item) {
-        if (is_cmm_hook_entry(item, matcher_str, old_matchers)) {
+        if (is_cmm_hook_entry(item, matcher_str, old_matchers, args.match_command_substr)) {
             yyjson_mut_arr_remove(event_arr, idx);
             break;
         }
@@ -2119,6 +2149,82 @@ static int cbm_remove_session_hooks(const char *settings_path) {
         }
     }
     return rc;
+}
+
+/* SubagentStart hook: subagents spawned via the Agent tool do NOT fire
+ * SessionStart, so the SessionStart reminder above never reaches them. This
+ * hook is their equivalent. Unlike SessionStart (where plain stdout is injected
+ * as context), SubagentStart injects context only via a JSON object on stdout:
+ *   {"hookSpecificOutput":{"hookEventName":"SubagentStart","additionalContext":"…"}}
+ * The text is a leaner variant of the SessionStart protocol: it omits the
+ * "run index_repository first" step, since the parent session has already
+ * indexed the project. Matcher "*" fires for every agent type. */
+#define CMM_SUBAGENT_REMINDER_SCRIPT "cbm-subagent-reminder"
+
+static void cbm_install_subagent_reminder_script(const char *home) {
+    if (!home) {
+        return;
+    }
+    char config_dir[CLI_BUF_1K];
+    cbm_claude_config_dir(home, config_dir, sizeof(config_dir));
+    if (!config_dir[0]) {
+        return;
+    }
+    char hooks_dir[CLI_BUF_1K];
+    snprintf(hooks_dir, sizeof(hooks_dir), "%s/hooks", config_dir);
+    cbm_mkdir_p(hooks_dir, CLI_OCTAL_PERM);
+
+    char script_path[CLI_BUF_1K];
+    snprintf(script_path, sizeof(script_path), "%s/" CMM_SUBAGENT_REMINDER_SCRIPT, hooks_dir);
+
+    FILE *f = fopen(script_path, "w");
+    if (!f) {
+        return;
+    }
+    /* The additionalContext value is a single line with no embedded quotes,
+     * backslashes, or newlines, so the JSON below is valid as written — no
+     * runtime escaping (and no python3/jq dependency) is required. */
+    (void)fprintf(f,
+                  "#!/bin/bash\n"
+                  "# SubagentStart hook: tell subagents to use codebase-memory-mcp tools.\n"
+                  "# Installed by codebase-memory-mcp. Fires when any subagent is spawned.\n"
+                  "# SubagentStart injects context via JSON additionalContext, not plain stdout.\n"
+                  "cat << 'REMINDER'\n"
+                  "{\"hookSpecificOutput\":{\"hookEventName\":\"SubagentStart\","
+                  "\"additionalContext\":\"Code discovery: prefer codebase-memory-mcp tools "
+                  "(search_graph, trace_path, get_code_snippet, query_graph, get_architecture, "
+                  "search_code) over grep/file-read for navigating code. Use Grep/Glob/Read for "
+                  "text, configs, and non-code files.\"}}\n"
+                  "REMINDER\n");
+#ifndef _WIN32
+    fchmod(fileno(f), CLI_OCTAL_PERM);
+#endif
+    (void)fclose(f);
+#ifdef _WIN32
+    chmod(script_path, CLI_OCTAL_PERM);
+#endif
+}
+
+int cbm_upsert_claude_subagent_hooks(const char *settings_path) {
+    char command[CLI_BUF_1K];
+    cbm_resolve_hook_command(CMM_SUBAGENT_REMINDER_SCRIPT, command, sizeof(command));
+    /* matcher "*" is the natural choice a user would also pick for their own
+     * catch-all SubagentStart hook, so claim ownership by command too — never
+     * clobber or remove a foreign "*" entry. */
+    return upsert_hooks_json(
+        (hooks_upsert_args_t){.settings_path = settings_path,
+                              .hook_event = "SubagentStart",
+                              .matcher_str = "*",
+                              .command_str = command,
+                              .match_command_substr = CMM_SUBAGENT_REMINDER_SCRIPT});
+}
+
+int cbm_remove_claude_subagent_hooks(const char *settings_path) {
+    return remove_hooks_json(
+        (hooks_remove_args_t){.settings_path = settings_path,
+                              .hook_event = "SubagentStart",
+                              .matcher_str = "*",
+                              .match_command_substr = CMM_SUBAGENT_REMINDER_SCRIPT});
 }
 
 /* Matcher excludes read_file for consistency with the Claude fix: the hook
@@ -3116,6 +3222,8 @@ static void install_claude_code_config(const char *home, const char *binary_path
         plan_record("Claude Code", "hook", p);
         snprintf(p, sizeof(p), "%s/hooks/%s", config_dir, CMM_SESSION_REMINDER_SCRIPT);
         plan_record("Claude Code", "hook", p);
+        snprintf(p, sizeof(p), "%s/hooks/%s", config_dir, CMM_SUBAGENT_REMINDER_SCRIPT);
+        plan_record("Claude Code", "hook", p);
         return;
     }
 
@@ -3149,9 +3257,12 @@ static void install_claude_code_config(const char *home, const char *binary_path
         cbm_install_hook_gate_script(home, binary_path);
         cbm_install_session_reminder_script(home);
         cbm_upsert_session_hooks(settings_path);
+        cbm_install_subagent_reminder_script(home);
+        cbm_upsert_claude_subagent_hooks(settings_path);
     }
     printf("  hooks: PreToolUse (Grep/Glob search-graph augmenter, non-blocking)\n");
     printf("  hooks: SessionStart (MCP usage reminder on startup/resume/clear/compact)\n");
+    printf("  hooks: SubagentStart (MCP usage reminder for subagents)\n");
 
     /* Migration nudge: when CLAUDE_CONFIG_DIR is set and a legacy ~/.claude tree
      * still exists, mention it so users can clean up stale artifacts. */
@@ -3774,8 +3885,9 @@ static void uninstall_claude_code(const char *home, bool dry_run) {
     if (!dry_run) {
         cbm_remove_claude_hooks(settings_path);
         cbm_remove_session_hooks(settings_path);
+        cbm_remove_claude_subagent_hooks(settings_path);
     }
-    printf("  removed PreToolUse + SessionStart hooks\n");
+    printf("  removed PreToolUse + SessionStart + SubagentStart hooks\n");
 }
 
 /* Remove MCP + instructions for a generic agent. */

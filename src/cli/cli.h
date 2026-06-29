@@ -213,6 +213,13 @@ int cbm_remove_codex_hooks(const char *config_path);
 int cbm_upsert_gemini_session_hooks(const char *settings_path);
 int cbm_remove_gemini_session_hooks(const char *settings_path);
 
+/* Install/remove a Claude Code SubagentStart reminder hook in settings.json.
+ * Subagents spawned via the Agent tool do not fire SessionStart, so this is the
+ * channel that gives them the same code-discovery guidance. Non-blocking; the
+ * hook injects context via JSON additionalContext. Returns 0 on success. */
+int cbm_upsert_claude_subagent_hooks(const char *settings_path);
+int cbm_remove_claude_subagent_hooks(const char *settings_path);
+
 /* ── PATH management ──────────────────────────────────────────── */
 
 /* Append an export PATH line to the given rc file.
