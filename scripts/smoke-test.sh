@@ -1208,26 +1208,31 @@ if [ "$(uname -s)" = "Darwin" ]; then
   BIN_ARCH=$(file "$SECURITY_BIN" | grep -o 'arm64\|x86_64' | head -1)
 
   if [ "$BIN_ARCH" = "arm64" ]; then
-    # arm64: a binary whose code signature is INVALID must SIGKILL (exit 137 = 128+9).
-    # We CORRUPT the signature blob in place instead of `codesign --remove-signature`: since macOS
-    # 11, a binary with NO LC_CODE_SIGNATURE is ad-hoc re-signed on exec by newer macOS and RUNS
-    # (exit 0) — that made this test flaky, then consistently red on updated CI runner images.
-    # Leaving the LC_CODE_SIGNATURE load command intact but garbling its blob makes AMFI see
-    # "signed but invalid" and reject it before any user code runs (deterministic). Corrupting only
-    # the signature blob (not the code) keeps the later 10e re-sign valid — it replaces the blob and
-    # the code is untouched. Refs: github.com/garrytan/gstack#997, nodejs/node#40827.
-    SIG_OFF=$(otool -l "$SECURITY_BIN" 2>/dev/null | awk '/LC_CODE_SIGNATURE/{f=1} f&&/dataoff/{print $2; exit}')
-    if [ -n "$SIG_OFF" ]; then
-      head -c 1024 /dev/urandom | dd of="$SECURITY_BIN" bs=1 seek="$((SIG_OFF + 8))" count=1024 conv=notrunc 2>/dev/null
-    else
-      codesign --remove-signature "$SECURITY_BIN" 2>/dev/null || true
-    fi
+    # arm64: a SIGNED binary whose CODE has been tampered (CodeDirectory hash mismatch) must be
+    # SIGKILLed (exit 137 = 128+9) by AMFI before user code runs. Neither `codesign
+    # --remove-signature` nor garbling the signature blob triggers this — since macOS 11 a binary
+    # with a missing/invalid signature is ad-hoc re-signed on exec by newer macOS and RUNS (exit 0),
+    # which made this test flaky then consistently red on updated CI runner images. The reliable
+    # trigger is tampering the signed CODE while leaving the valid signature attached: the kernel
+    # validates the executed page against the (intact) CodeDirectory hash, finds the mismatch, and
+    # kills the process. Done on a SEPARATE copy so the original $SECURITY_BIN stays intact for the
+    # 10e re-sign test. Refs: github.com/garrytan/gstack#997, github.com/nodejs/node#40827.
+    TAMPER_BIN="${SECURITY_BIN}.tampered"
+    cp "$SECURITY_BIN" "$TAMPER_BIN"
+    # Zero the entry-point instructions (LC_MAIN entryoff = start of __text) plus a span of early
+    # __text, leaving the Mach-O header + load commands (offset 0..entryoff) intact so the binary
+    # still parses. The tampered code pages no longer match their CodeDirectory hashes -> SIGKILL.
+    ENTRY_OFF=$(otool -l "$SECURITY_BIN" 2>/dev/null | awk '/LC_MAIN/{f=1} f&&/entryoff/{print $2; exit}')
+    ENTRY_OFF=${ENTRY_OFF:-2184}
+    dd if=/dev/zero of="$TAMPER_BIN" bs=1 seek="$ENTRY_OFF" count=4096 conv=notrunc 2>/dev/null
+    dd if=/dev/zero of="$TAMPER_BIN" bs=4096 seek=4 count=512 conv=notrunc 2>/dev/null
     UNSIGNED_EXIT=0
-    "$SECURITY_BIN" --version > /dev/null 2>&1 || UNSIGNED_EXIT=$?
+    "$TAMPER_BIN" --version > /dev/null 2>&1 || UNSIGNED_EXIT=$?
+    rm -f "$TAMPER_BIN"
     if [ "$UNSIGNED_EXIT" -eq 137 ] || [ "$UNSIGNED_EXIT" -eq 9 ]; then
-      echo "OK 10c: invalid-signature arm64 binary killed (exit $UNSIGNED_EXIT)"
+      echo "OK 10c: tampered-code arm64 binary killed (exit $UNSIGNED_EXIT)"
     else
-      echo "FAIL 10c: invalid-signature arm64 exit=$UNSIGNED_EXIT (expected 137)"
+      echo "FAIL 10c: tampered-code arm64 exit=$UNSIGNED_EXIT (expected 137)"
       exit 1
     fi
   else
