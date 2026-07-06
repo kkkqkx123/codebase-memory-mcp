@@ -663,45 +663,35 @@ int64_t cbm_gbuf_upsert_node(cbm_gbuf_t *gb, const char *label, const char *name
             (strcmp(existing->label, "Project") == 0 || strcmp(existing->label, "Folder") == 0)) {
             return existing->id;
         }
-        /* Same-QN arrival. Two distinct cases:
-         *
-         * 1) The SAME source entity re-upserted (identity fields match) —
-         *    refresh in place, exactly as before.
-         *
-         * 2) A DIFFERENT source entity sharing the QN. In C a struct, a
-         *    function and a macro can all carry one name and the QN scheme
-         *    does not encode the entity kind, so they collide here. The old
-         *    code let the LAST arrival overwrite — under parallel extraction
-         *    the merge order varies run to run, so WHICH entity survived
-         *    (label/name/lines/props) flickered (xfs: Function-node count
-         *    4998 vs 5015 across two runs), and every order-sensitive
-         *    consumer downstream (semantic vectors, LSH, near-threshold
-         *    scores) inherited the flicker. Pick the survivor by a canonical
-         *    CONTENT rule instead — lexicographically smallest
-         *    (label, file_path, start_line, name) — so the outcome is a pure
-         *    function of the colliding entities, not of scheduling. Exactly
-         *    one entity is dropped, as one always was; kind-disambiguated
-         *    QNs (the real cure) are tracked as a follow-up. */
-        bool same_entity = existing->label && label && strcmp(existing->label, label) == 0 &&
-                           existing->file_path && file_path &&
-                           strcmp(existing->file_path, file_path) == 0 &&
-                           existing->start_line == start_line && existing->name && name &&
-                           strcmp(existing->name, name) == 0;
-        if (!same_entity) {
-            int c = strcmp(label ? label : "", existing->label ? existing->label : "");
-            if (c == 0) {
-                c = strcmp(file_path ? file_path : "",
-                           existing->file_path ? existing->file_path : "");
-            }
-            if (c == 0) {
-                c = start_line - existing->start_line;
-            }
-            if (c == 0) {
-                c = strcmp(name ? name : "", existing->name ? existing->name : "");
-            }
-            if (c >= 0) {
-                return existing->id; /* existing entity is the canonical winner */
-            }
+        /* Same-QN arrival: distinct source entities can share a QN (C: a
+         * struct, a function and a macro with one name), and the same entity
+         * can be re-upserted with fresh content. The old code let the LAST
+         * arrival overwrite — under parallel extraction the merge order
+         * varies run to run, so WHICH entity survived flickered (xfs:
+         * Function-node count 4998 vs 5015 across two runs) and every
+         * order-sensitive consumer downstream inherited it. Pick the
+         * survivor by a canonical CONTENT rule instead, a pure function of
+         * the two candidates: smallest file_path, then LARGEST start_line,
+         * then largest name/label (a mixed-direction composite is still a
+         * total order, so the pick is commutative and scheduling-free).
+         * Line-descending within a file keeps the classic upsert contract —
+         * a later definition in the same file (macro redefinition, refresh
+         * of the same entity with new content) replaces the earlier one,
+         * deterministically, because intra-file arrival order is fixed. A
+         * full tie is the same entity re-upserted → refresh in place.
+         * Kind-disambiguated QNs (the real cure) remain a follow-up. */
+        int c = strcmp(file_path ? file_path : "", existing->file_path ? existing->file_path : "");
+        if (c == 0) {
+            c = existing->start_line - start_line;
+        }
+        if (c == 0) {
+            c = strcmp(existing->name ? existing->name : "", name ? name : "");
+        }
+        if (c == 0) {
+            c = strcmp(existing->label ? existing->label : "", label ? label : "");
+        }
+        if (c > 0) {
+            return existing->id; /* existing entity is the canonical winner */
         }
         /* Update in-place. name/properties are strdup'd BEFORE freeing old ones
          * (callers may pass existing->name as an argument). label/file_path are
@@ -1206,32 +1196,25 @@ static void merge_update_existing(cbm_gbuf_t *dst, cbm_gbuf_node_t *existing,
         (strcmp(existing->label, "Project") == 0 || strcmp(existing->label, "Folder") == 0);
     if (!module_on_container) {
         /* Canonical collision winner (determinism) — mirrors
-         * cbm_gbuf_upsert_node. Distinct source entities can share a QN (C:
-         * struct/function/macro with one name); unconditional "src wins" made
-         * the survivor depend on worker merge order, flickering the node set
-         * (and every downstream consumer) run to run. Same entity → refresh;
-         * different entity → keep the lexicographically smallest
-         * (label, file_path, start_line, name). */
-        bool same_entity = existing->label && sn->label &&
-                           strcmp(existing->label, sn->label) == 0 && existing->file_path &&
-                           sn->file_path && strcmp(existing->file_path, sn->file_path) == 0 &&
-                           existing->start_line == sn->start_line && existing->name && sn->name &&
-                           strcmp(existing->name, sn->name) == 0;
-        bool sn_wins = true;
-        if (!same_entity) {
-            int c = strcmp(sn->label ? sn->label : "", existing->label ? existing->label : "");
-            if (c == 0) {
-                c = strcmp(sn->file_path ? sn->file_path : "",
-                           existing->file_path ? existing->file_path : "");
-            }
-            if (c == 0) {
-                c = sn->start_line - existing->start_line;
-            }
-            if (c == 0) {
-                c = strcmp(sn->name ? sn->name : "", existing->name ? existing->name : "");
-            }
-            sn_wins = c < 0;
+         * cbm_gbuf_upsert_node exactly. Distinct source entities can share a
+         * QN (C: struct/function/macro with one name); unconditional "src
+         * wins" made the survivor depend on worker merge order, flickering
+         * the node set (and every downstream consumer) run to run. Winner =
+         * smallest file_path, then LARGEST start_line, then largest
+         * name/label — one total order, commutative, scheduling-free; a full
+         * tie is the same entity → refresh from src. */
+        int c = strcmp(sn->file_path ? sn->file_path : "",
+                       existing->file_path ? existing->file_path : "");
+        if (c == 0) {
+            c = existing->start_line - sn->start_line;
         }
+        if (c == 0) {
+            c = strcmp(existing->name ? existing->name : "", sn->name ? sn->name : "");
+        }
+        if (c == 0) {
+            c = strcmp(existing->label ? existing->label : "", sn->label ? sn->label : "");
+        }
+        bool sn_wins = c <= 0;
         if (sn_wins) {
             /* Keep the secondary indexes consistent when the surviving
              * label/name changes (the old code left the node listed under its
